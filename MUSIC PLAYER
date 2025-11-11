@@ -1,0 +1,701 @@
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import pygame
+import os
+import time
+import random
+from mutagen import File
+from mutagen.id3 import ID3
+import json
+from pathlib import Path
+from typing import List, Dict, Optional
+import threading
+from dataclasses import dataclass
+
+@dataclass
+class Song:
+    path: str
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    duration: float = 0.0
+    year: str = ""
+
+class AdvancedMusicPlayer:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("🎵 Melody Master Pro")
+        self.root.geometry("1000x700")
+        self.root.configure(bg='#1a1a1a')
+        
+        # Initialize pygame mixer with better settings
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=1024)
+        
+        # Player state
+        self.playlist: List[Song] = []
+        self.current_index: int = 0
+        self.is_playing: bool = False
+        self.is_paused: bool = False
+        self.volume: float = 0.7
+        self.repeat_mode: str = "off"  # off, one, all
+        self.shuffle: bool = False
+        self.current_position: float = 0.0
+        self.total_duration: float = 0.0
+        
+        # Equalizer bands (simulated)
+        self.equalizer = {
+            "bass": 0.0,
+            "mid": 0.0,
+            "treble": 0.0
+        }
+        
+        # Load settings
+        self.settings_file = "music_player_settings.json"
+        self.load_settings()
+        
+        # Create GUI
+        self.setup_gui()
+        
+        # Start update thread
+        self.update_thread()
+        
+    def setup_gui(self):
+        # Create main frames
+        self.main_container = tk.Frame(self.root, bg='#1a1a1a')
+        self.main_container.pack(fill=tk.BOTH, expand=True, padx=15, pady=15)
+        
+        # Header
+        self.create_header()
+        
+        # Content area
+        self.content_frame = tk.Frame(self.main_container, bg='#1a1a1a')
+        self.content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Left sidebar (now playing)
+        self.create_now_playing_panel()
+        
+        # Right content (playlist and controls)
+        self.create_playlist_panel()
+        
+        # Bottom controls
+        self.create_control_panel()
+        
+        # Status bar
+        self.create_status_bar()
+        
+    def create_header(self):
+        header_frame = tk.Frame(self.main_container, bg='#2d2d2d', height=80)
+        header_frame.pack(fill=tk.X, pady=(0, 15))
+        header_frame.pack_propagate(False)
+        
+        # Logo and title
+        title_frame = tk.Frame(header_frame, bg='#2d2d2d')
+        title_frame.pack(side=tk.LEFT, padx=20)
+        
+        title = tk.Label(title_frame, text="🎵 Melody Master Pro", 
+                        font=('Arial', 20, 'bold'), 
+                        fg='#ffffff', bg='#2d2d2d')
+        title.pack(pady=10)
+        
+        # Quick actions
+        action_frame = tk.Frame(header_frame, bg='#2d2d2d')
+        action_frame.pack(side=tk.RIGHT, padx=20)
+        
+        action_buttons = [
+            ("📁 Import", self.import_playlist),
+            ("💾 Save", self.save_playlist),
+            ("⚙️ Settings", self.show_settings),
+            ("ℹ️ Info", self.show_info)
+        ]
+        
+        for text, command in action_buttons:
+            btn = tk.Button(action_frame, text=text, command=command,
+                          font=('Arial', 10), bg='#404040', fg='white',
+                          relief='flat', padx=10)
+            btn.pack(side=tk.LEFT, padx=5)
+        
+    def create_now_playing_panel(self):
+        now_playing_frame = tk.Frame(self.content_frame, bg='#2d2d2d', width=300)
+        now_playing_frame.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 15))
+        now_playing_frame.pack_propagate(False)
+        
+        # Album art placeholder
+        album_frame = tk.Frame(now_playing_frame, bg='#404040', height=250)
+        album_frame.pack(fill=tk.X, padx=15, pady=15)
+        album_frame.pack_propagate(False)
+        
+        self.album_art = tk.Label(album_frame, text="🎵\nAlbum Art", 
+                                font=('Arial', 16), bg='#404040', fg='#cccccc',
+                                justify=tk.CENTER)
+        self.album_art.pack(expand=True)
+        
+        # Song info
+        info_frame = tk.Frame(now_playing_frame, bg='#2d2d2d')
+        info_frame.pack(fill=tk.X, padx=15, pady=10)
+        
+        self.song_title = tk.Label(info_frame, text="No song selected", 
+                                 font=('Arial', 14, 'bold'), 
+                                 fg='white', bg='#2d2d2d', wraplength=270)
+        self.song_title.pack(anchor=tk.W)
+        
+        self.song_artist = tk.Label(info_frame, text="Unknown Artist", 
+                                  font=('Arial', 12), 
+                                  fg='#cccccc', bg='#2d2d2d')
+        self.song_artist.pack(anchor=tk.W, pady=(2, 0))
+        
+        self.song_album = tk.Label(info_frame, text="Unknown Album", 
+                                 font=('Arial', 10), 
+                                 fg='#999999', bg='#2d2d2d')
+        self.song_album.pack(anchor=tk.W, pady=(2, 0))
+        
+        # Progress
+        progress_frame = tk.Frame(now_playing_frame, bg='#2d2d2d')
+        progress_frame.pack(fill=tk.X, padx=15, pady=10)
+        
+        self.time_labels = tk.Frame(progress_frame, bg='#2d2d2d')
+        self.time_labels.pack(fill=tk.X)
+        
+        self.current_time = tk.Label(self.time_labels, text="0:00", 
+                                   font=('Arial', 10), fg='#cccccc', bg='#2d2d2d')
+        self.current_time.pack(side=tk.LEFT)
+        
+        self.total_time = tk.Label(self.time_labels, text="0:00", 
+                                 font=('Arial', 10), fg='#cccccc', bg='#2d2d2d')
+        self.total_time.pack(side=tk.RIGHT)
+        
+        self.progress = ttk.Scale(progress_frame, from_=0, to=100, 
+                                orient=tk.HORIZONTAL, command=self.seek_to_position)
+        self.progress.pack(fill=tk.X, pady=5)
+        
+        # Equalizer
+        self.create_equalizer(now_playing_frame)
+        
+    def create_equalizer(self, parent):
+        eq_frame = tk.LabelFrame(parent, text="Equalizer", bg='#2d2d2d', 
+                                fg='white', font=('Arial', 10, 'bold'),
+                                padx=10, pady=10)
+        eq_frame.pack(fill=tk.X, padx=15, pady=10)
+        
+        bands = [
+            ("Bass", "bass"),
+            ("Mid", "mid"), 
+            ("Treble", "treble")
+        ]
+        
+        for name, key in bands:
+            band_frame = tk.Frame(eq_frame, bg='#2d2d2d')
+            band_frame.pack(fill=tk.X, pady=5)
+            
+            tk.Label(band_frame, text=name, font=('Arial', 9), 
+                    fg='white', bg='#2d2d2d', width=8).pack(side=tk.LEFT)
+            
+            scale = ttk.Scale(band_frame, from_=-10, to=10, orient=tk.HORIZONTAL,
+                            command=lambda v, k=key: self.set_equalizer_band(k, float(v)))
+            scale.set(self.equalizer[key])
+            scale.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            
+            value_label = tk.Label(band_frame, text=str(self.equalizer[key]), 
+                                 font=('Arial', 8), fg='#cccccc', bg='#2d2d2d', width=4)
+            value_label.pack(side=tk.RIGHT)
+            
+    def create_playlist_panel(self):
+        playlist_container = tk.Frame(self.content_frame, bg='#1a1a1a')
+        playlist_container.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Playlist header
+        playlist_header = tk.Frame(playlist_container, bg='#2d2d2d', height=40)
+        playlist_header.pack(fill=tk.X)
+        playlist_header.pack_propagate(False)
+        
+        tk.Label(playlist_header, text="Playlist", font=('Arial', 12, 'bold'),
+                fg='white', bg='#2d2d2d').pack(side=tk.LEFT, padx=15, pady=10)
+        
+        header_buttons = [
+            ("➕ Add Songs", self.add_songs),
+            ("🗑️ Remove", self.remove_song),
+            ("🔼 Move Up", self.move_song_up),
+            ("🔽 Move Down", self.move_song_down),
+            ("🔀 Shuffle", self.toggle_shuffle)
+        ]
+        
+        for text, command in header_buttons:
+            btn = tk.Button(playlist_header, text=text, command=command,
+                          font=('Arial', 9), bg='#404040', fg='white',
+                          relief='flat')
+            btn.pack(side=tk.LEFT, padx=5)
+        
+        # Playlist with treeview
+        self.create_playlist_treeview(playlist_container)
+        
+    def create_playlist_treeview(self, parent):
+        # Create frame for treeview and scrollbar
+        tree_frame = tk.Frame(parent, bg='#1a1a1a')
+        tree_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        
+        # Define columns
+        columns = ('#', 'Title', 'Artist', 'Album', 'Duration')
+        
+        # Create treeview
+        self.playlist_tree = ttk.Treeview(tree_frame, columns=columns, show='headings',
+                                        selectmode='browse', height=15)
+        
+        # Define headings
+        self.playlist_tree.heading('#', text='#')
+        self.playlist_tree.heading('Title', text='Title')
+        self.playlist_tree.heading('Artist', text='Artist') 
+        self.playlist_tree.heading('Album', text='Album')
+        self.playlist_tree.heading('Duration', text='Duration')
+        
+        # Configure columns
+        self.playlist_tree.column('#', width=40, anchor=tk.CENTER)
+        self.playlist_tree.column('Title', width=200, anchor=tk.W)
+        self.playlist_tree.column('Artist', width=150, anchor=tk.W)
+        self.playlist_tree.column('Album', width=150, anchor=tk.W)
+        self.playlist_tree.column('Duration', width=80, anchor=tk.CENTER)
+        
+        # Style the treeview
+        style = ttk.Style()
+        style.theme_use('clam')
+        style.configure("Treeview", 
+                       background="#2d2d2d",
+                       foreground="white",
+                       fieldbackground="#2d2d2d",
+                       rowheight=25)
+        style.configure("Treeview.Heading",
+                       background="#404040",
+                       foreground="white",
+                       relief="flat")
+        style.map('Treeview', background=[('selected', '#3498db')])
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, 
+                                 command=self.playlist_tree.yview)
+        self.playlist_tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Pack treeview and scrollbar
+        self.playlist_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Bind double click to play
+        self.playlist_tree.bind('<Double-1>', self.on_song_double_click)
+        
+    def create_control_panel(self):
+        control_frame = tk.Frame(self.main_container, bg='#2d2d2d', height=100)
+        control_frame.pack(fill=tk.X, pady=(15, 0))
+        control_frame.pack_propagate(False)
+        
+        # Main controls
+        main_controls = tk.Frame(control_frame, bg='#2d2d2d')
+        main_controls.pack(expand=True)
+        
+        # Control buttons
+        controls = [
+            ("⏮️", self.previous_song, 25),
+            ("⏯️", self.toggle_play_pause, 40),
+            ("⏹️", self.stop_music, 25),
+            ("⏭️", self.next_song, 25),
+        ]
+        
+        for symbol, command, size in controls:
+            btn = tk.Button(main_controls, text=symbol, command=command,
+                          font=('Arial', size), bg='#404040', fg='white',
+                          relief='flat', bd=0, padx=10)
+            btn.pack(side=tk.LEFT, padx=10)
+        
+        # Volume control
+        volume_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        volume_frame.pack(side=tk.RIGHT, padx=20)
+        
+        self.volume_btn = tk.Button(volume_frame, text="🔊", 
+                                  command=self.toggle_mute,
+                                  font=('Arial', 12), bg='#404040', fg='white')
+        self.volume_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.volume_scale = ttk.Scale(volume_frame, from_=0, to=100,
+                                    orient=tk.HORIZONTAL, 
+                                    command=self.set_volume)
+        self.volume_scale.set(self.volume * 100)
+        self.volume_scale.pack(side=tk.LEFT, padx=5)
+        self.volume_scale.configure(length=120)
+        
+        # Repeat mode
+        repeat_frame = tk.Frame(control_frame, bg='#2d2d2d')
+        repeat_frame.pack(side=tk.LEFT, padx=20)
+        
+        self.repeat_btn = tk.Button(repeat_frame, text="🔁", 
+                                  command=self.cycle_repeat_mode,
+                                  font=('Arial', 12), bg='#404040', fg='white')
+        self.repeat_btn.pack()
+        
+        self.repeat_label = tk.Label(repeat_frame, text="Off", 
+                                   font=('Arial', 8), fg='white', bg='#2d2d2d')
+        self.repeat_label.pack()
+        
+    def create_status_bar(self):
+        self.status_bar = tk.Frame(self.main_container, bg='#404040', height=25)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        self.status_bar.pack_propagate(False)
+        
+        self.status_text = tk.Label(self.status_bar, text="Ready to play music", 
+                                  font=('Arial', 9), fg='white', bg='#404040',
+                                  anchor=tk.W)
+        self.status_text.pack(fill=tk.X, padx=10)
+        
+    # Music control methods
+    def add_songs(self):
+        files = filedialog.askopenfilenames(
+            title="Select Music Files",
+            filetypes=(
+                ("Audio Files", "*.mp3 *.wav *.ogg *.flac"),
+                ("MP3 Files", "*.mp3"),
+                ("WAV Files", "*.wav"), 
+                ("All Files", "*.*")
+            )
+        )
+        
+        new_songs = []
+        for file_path in files:
+            song = self.get_song_info(file_path)
+            if song:
+                self.playlist.append(song)
+                new_songs.append(song)
+                
+        if new_songs:
+            self.update_playlist_display()
+            self.status_text.config(text=f"Added {len(new_songs)} songs to playlist")
+            
+    def get_song_info(self, file_path: str) -> Optional[Song]:
+        try:
+            audio_file = File(file_path)
+            song = Song(path=file_path)
+            
+            # Get metadata
+            if audio_file is not None:
+                if hasattr(audio_file, 'tags') and audio_file.tags is not None:
+                    tags = audio_file.tags
+                    song.title = str(tags.get('title', [os.path.basename(file_path)]))[0]
+                    song.artist = str(tags.get('artist', ['Unknown Artist']))[0]
+                    song.album = str(tags.get('album', ['Unknown Album']))[0]
+                    song.year = str(tags.get('date', ['']))[0]
+                else:
+                    # Fallback to filename
+                    filename = os.path.basename(file_path)
+                    song.title = os.path.splitext(filename)[0]
+                    song.artist = "Unknown Artist"
+                    song.album = "Unknown Album"
+                    
+                song.duration = audio_file.info.length
+            else:
+                return None
+                
+            return song
+            
+        except Exception as e:
+            print(f"Error reading file {file_path}: {e}")
+            return None
+            
+    def update_playlist_display(self):
+        # Clear existing items
+        for item in self.playlist_tree.get_children():
+            self.playlist_tree.delete(item)
+            
+        # Add songs to treeview
+        for i, song in enumerate(self.playlist, 1):
+            duration = self.format_duration(song.duration)
+            self.playlist_tree.insert('', 'end', values=(
+                i, song.title, song.artist, song.album, duration
+            ))
+            
+    def format_duration(self, seconds: float) -> str:
+        if seconds == 0:
+            return "0:00"
+        minutes = int(seconds // 60)
+        seconds = int(seconds % 60)
+        return f"{minutes}:{seconds:02d}"
+        
+    def on_song_double_click(self, event):
+        selection = self.playlist_tree.selection()
+        if selection:
+            index = self.playlist_tree.index(selection[0])
+            self.current_index = index
+            self.play_current_song()
+            
+    def play_current_song(self):
+        if not self.playlist:
+            return
+            
+        try:
+            song = self.playlist[self.current_index]
+            pygame.mixer.music.load(song.path)
+            pygame.mixer.music.play()
+            
+            self.is_playing = True
+            self.is_paused = False
+            self.total_duration = song.duration
+            self.current_position = 0.0
+            
+            # Update UI
+            self.song_title.config(text=song.title)
+            self.song_artist.config(text=song.artist)
+            self.song_album.config(text=song.album)
+            self.total_time.config(text=self.format_duration(song.duration))
+            
+            # Highlight current song
+            self.highlight_current_song()
+            
+            self.status_text.config(text=f"Now playing: {song.title}")
+            
+        except pygame.error as e:
+            messagebox.showerror("Playback Error", f"Cannot play file: {e}")
+            
+    def toggle_play_pause(self):
+        if not self.playlist:
+            return
+            
+        if self.is_playing and not self.is_paused:
+            pygame.mixer.music.pause()
+            self.is_paused = True
+            self.status_text.config(text="Playback paused")
+        elif self.is_paused:
+            pygame.mixer.music.unpause()
+            self.is_paused = False
+            self.status_text.config(text="Playback resumed")
+        else:
+            self.play_current_song()
+            
+    def stop_music(self):
+        pygame.mixer.music.stop()
+        self.is_playing = False
+        self.is_paused = False
+        self.current_position = 0.0
+        self.progress.set(0)
+        self.status_text.config(text="Playback stopped")
+        
+    def next_song(self):
+        if not self.playlist:
+            return
+            
+        if self.shuffle:
+            self.current_index = random.randint(0, len(self.playlist) - 1)
+        else:
+            self.current_index = (self.current_index + 1) % len(self.playlist)
+            
+        self.play_current_song()
+        
+    def previous_song(self):
+        if not self.playlist:
+            return
+            
+        self.current_index = (self.current_index - 1) % len(self.playlist)
+        self.play_current_song()
+        
+    def highlight_current_song(self):
+        # Clear previous selection
+        for item in self.playlist_tree.selection():
+            self.playlist_tree.selection_remove(item)
+            
+        # Select current song
+        if self.playlist_tree.get_children():
+            items = self.playlist_tree.get_children()
+            if 0 <= self.current_index < len(items):
+                self.playlist_tree.selection_add(items[self.current_index])
+                self.playlist_tree.focus(items[self.current_index])
+                
+    def seek_to_position(self, value):
+        if self.is_playing and self.total_duration > 0:
+            position = float(value) / 100 * self.total_duration
+            pygame.mixer.music.set_pos(position)
+            self.current_position = position
+            
+    def set_volume(self, value):
+        self.volume = float(value) / 100
+        pygame.mixer.music.set_volume(self.volume)
+        
+        # Update volume icon
+        if self.volume == 0:
+            self.volume_btn.config(text="🔇")
+        elif self.volume < 0.3:
+            self.volume_btn.config(text="🔈")
+        elif self.volume < 0.7:
+            self.volume_btn.config(text="🔉")
+        else:
+            self.volume_btn.config(text="🔊")
+            
+    def toggle_mute(self):
+        if self.volume > 0:
+            self.last_volume = self.volume
+            self.volume_scale.set(0)
+        else:
+            self.volume_scale.set(self.last_volume * 100)
+            
+    def cycle_repeat_mode(self):
+        modes = ["off", "one", "all"]
+        current_index = modes.index(self.repeat_mode)
+        self.repeat_mode = modes[(current_index + 1) % len(modes)]
+        
+        # Update UI
+        self.repeat_label.config(text=self.repeat_mode.capitalize())
+        
+        colors = {"off": "#404040", "one": "#e74c3c", "all": "#3498db"}
+        self.repeat_btn.config(bg=colors[self.repeat_mode])
+        
+    def toggle_shuffle(self):
+        self.shuffle = not self.shuffle
+        color = "#3498db" if self.shuffle else "#404040"
+        self.status_text.config(text=f"Shuffle: {'ON' if self.shuffle else 'OFF'}")
+        
+    def set_equalizer_band(self, band: str, value: float):
+        self.equalizer[band] = value
+        # In a real implementation, you'd apply this to the audio
+        
+    def remove_song(self):
+        selection = self.playlist_tree.selection()
+        if selection:
+            index = self.playlist_tree.index(selection[0])
+            self.playlist.pop(index)
+            self.update_playlist_display()
+            
+    def move_song_up(self):
+        selection = self.playlist_tree.selection()
+        if selection and len(selection) == 1:
+            index = self.playlist_tree.index(selection[0])
+            if index > 0:
+                # Swap songs
+                self.playlist[index], self.playlist[index-1] = self.playlist[index-1], self.playlist[index]
+                self.update_playlist_display()
+                # Reselect the moved song
+                items = self.playlist_tree.get_children()
+                self.playlist_tree.selection_add(items[index-1])
+                
+    def move_song_down(self):
+        selection = self.playlist_tree.selection()
+        if selection and len(selection) == 1:
+            index = self.playlist_tree.index(selection[0])
+            if index < len(self.playlist) - 1:
+                # Swap songs
+                self.playlist[index], self.playlist[index+1] = self.playlist[index+1], self.playlist[index]
+                self.update_playlist_display()
+                # Reselect the moved song
+                items = self.playlist_tree.get_children()
+                self.playlist_tree.selection_add(items[index+1])
+                
+    def update_thread(self):
+        def update():
+            while True:
+                if self.is_playing and not self.is_paused:
+                    # Update progress
+                    self.current_position += 0.1
+                    if self.total_duration > 0:
+                        progress_percent = (self.current_position / self.total_duration) * 100
+                        self.progress.set(progress_percent)
+                        self.current_time.config(text=self.format_duration(self.current_position))
+                        
+                    # Check if song ended
+                    if self.current_position >= self.total_duration:
+                        self.handle_song_end()
+                        
+                time.sleep(0.1)
+                
+        thread = threading.Thread(target=update, daemon=True)
+        thread.start()
+        
+    def handle_song_end(self):
+        if self.repeat_mode == "one":
+            self.play_current_song()
+        elif self.repeat_mode == "all" or self.current_index < len(self.playlist) - 1:
+            self.next_song()
+        else:
+            self.stop_music()
+            
+    def import_playlist(self):
+        # Placeholder for playlist import functionality
+        messagebox.showinfo("Import", "Playlist import feature")
+        
+    def save_playlist(self):
+        # Placeholder for playlist save functionality
+        messagebox.showinfo("Save", "Playlist save feature")
+        
+    def show_settings(self):
+        # Placeholder for settings dialog
+        messagebox.showinfo("Settings", "Settings dialog")
+        
+    def show_info(self):
+        info = """
+Melody Master Pro Music Player
+
+Features:
+• Advanced playlist management
+• Equalizer controls
+• Multiple repeat modes
+• Shuffle playback
+• Song metadata display
+• Modern dark theme
+
+Created with Python and Pygame
+        """
+        messagebox.showinfo("About", info)
+        
+    def load_settings(self):
+        try:
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    self.volume = settings.get('volume', 0.7)
+                    self.equalizer = settings.get('equalizer', self.equalizer)
+        except Exception as e:
+            print(f"Error loading settings: {e}")
+            
+    def save_settings(self):
+        try:
+            settings = {
+                'volume': self.volume,
+                'equalizer': self.equalizer
+            }
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f)
+        except Exception as e:
+            print(f"Error saving settings: {e}")
+            
+    def on_closing(self):
+        self.save_settings()
+        pygame.mixer.quit()
+        self.root.destroy()
+
+def main():
+    root = tk.Tk()
+    app = AdvancedMusicPlayer(root)
+    
+    # Handle window closing
+    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
+# Here are some additional features you can implement:
+
+# 1. Keyboard shortcuts
+def bind_keyboard_shortcuts(self):
+    self.root.bind('<space>', lambda e: self.toggle_play_pause())
+    self.root.bind('<Left>', lambda e: self.seek_backward())
+    self.root.bind('<Right>', lambda e: self.seek_forward())
+    self.root.bind('<Control-n>', lambda e: self.next_song())
+    self.root.bind('<Control-p>', lambda e: self.previous_song())
+
+# 2. Playlist file support (M3U)
+def save_m3u_playlist(self, filename):
+    with open(filename, 'w', encoding='utf-8') as f:
+        f.write('#EXTM3U\n')
+        for song in self.playlist:
+            f.write(f'#EXTINF:{int(song.duration)},{song.artist} - {song.title}\n')
+            f.write(f'{song.path}\n')
+
+# 3. Audio effects
+def apply_audio_effects(self):
+    # This would require additional audio processing libraries
+    pass
+
+# 4. Mini-player mode
+def toggle_mini_player(self):
+    # Switch between full and compact view
+    pass
